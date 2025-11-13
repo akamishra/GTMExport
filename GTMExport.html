@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GTM JSON → Excel/CSV Converter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: #1f2937; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; max-width: 1000px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1 1 280px; min-width: 280px; }
+    label { display: block; margin: 8px 0 4px; font-weight: 600; }
+    input[type="file"] { width: 100%; }
+    .opts { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 12px; }
+    .opt { display: flex; align-items: center; gap: 8px; }
+    button { background: #111827; color: white; border: 0; padding: 10px 14px; border-radius: 6px; cursor: pointer; }
+    button.secondary { background: #374151; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .log { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; max-height: 200px; overflow: auto; }
+    .help { color: #4b5563; font-size: 13px; }
+    .badge { background: #eef2ff; color: #3730a3; border-radius: 9999px; padding: 2px 8px; font-size: 12px; }
+    a { color: #1d4ed8; text-decoration: none; }
+  </style>
+  <!-- SheetJS (xlsx) for Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha256-f4bP6k3KQ6n1zXx4H7qk1u0AiJcG0mT8H9H2yq6a9UQ=" crossorigin="anonymous"></script>
+</head>
+<body>
+  <h1>GTM Container JSON → Excel/CSV</h1>
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <label for="file">Container export (container.json)</label>
+        <input id="file" type="file" accept=".json,application/json" />
+        <div class="help">Export from GTM Admin → Export Container (JSON). [Help]</div>
+        <div class="help"><span class="badge">Tip</span> Large containers work; all parsing is client-side.</div>
+      </div>
+      <div class="col">
+        <label>Include entities</label>
+        <div class="opts">
+          <label class="opt"><input type="checkbox" id="incTags" checked /> Tags</label>
+          <label class="opt"><input type="checkbox" id="incTriggers" checked /> Triggers</label>
+          <label class="opt"><input type="checkbox" id="incVars" checked /> Variables</label>
+        </div>
+        <label>Options</label>
+        <div class="opts">
+          <label class="opt"><input type="checkbox" id="includeTagContent" /> Include tag content column</label>
+          <label class="opt"><input type="checkbox" id="oneHotTriggers" /> Expand firing/blocking triggers to columns</label>
+        </div>
+        <div class="help">“Tag content” adds a prettified JSON snapshot of each tag’s full configuration.</div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px;">
+      <div class="col">
+        <button id="toExcel" disabled>Export Excel (.xlsx)</button>
+        <button id="toCsv" class="secondary" disabled>Export CSVs (.zip)</button>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;">
+      <label>Log</label>
+      <div id="log" class="log">Waiting for file…</div>
+    </div>
+  </div>
+
+<script>
+  const logEl = document.getElementById('log');
+  const fileEl = document.getElementById('file');
+  const toExcelBtn = document.getElementById('toExcel');
+  const toCsvBtn = document.getElementById('toCsv');
+  const incTagsEl = document.getElementById('incTags');
+  const incTriggersEl = document.getElementById('incTriggers');
+  const incVarsEl = document.getElementById('incVars');
+  const includeTagContentEl = document.getElementById('includeTagContent');
+  const oneHotTriggersEl = document.getElementById('oneHotTriggers');
+
+  let gtm = null;
+
+  function log(msg) {
+    logEl.textContent += '\\n' + msg;
+  }
+
+  function reset() {
+    gtm = null;
+    toExcelBtn.disabled = true;
+    toCsvBtn.disabled = true;
+    logEl.textContent = 'Waiting for file…';
+  }
+
+  fileEl.addEventListener('change', async (e) => {
+    reset();
+    const file = e.target.files?.[0];
+    if (!file) return;
+    log('Reading ' + file.name + ' …');
+    try {
+      const text = await file.text();
+      const json = JSON.parse(text);
+      // Accept either full export object or entities-only
+      if (json?.containerVersion || json?.exportFormatVersion) {
+        gtm = normalizeGtm(json);
+      } else {
+        gtm = normalizeEntities(json);
+      }
+      summarize(gtm);
+      toExcelBtn.disabled = false;
+      toCsvBtn.disabled = false;
+      log('Ready to export.');
+    } catch (err) {
+      log('ERROR: ' + err.message);
+    }
+  });
+
+  function normalizeGtm(json) {
+    // Standard container export: containerVersion holds entities
+    const cv = json.containerVersion || json;
+    return {
+      accountId: cv.accountId || json.accountId || '',
+      containerId: cv.containerId || json.containerId || '',
+      container: json.container || null,
+      tags: cv.tag || [],
+      triggers: cv.trigger || [],
+      variables: cv.variable || [],
+      folders: cv.folder || [],
+      builtInVars: cv.builtInVariable || [],
+      exportFormatVersion: json.exportFormatVersion || null,
+      versionName: cv.name || json.name || '',
+    };
+  }
+
+  function normalizeEntities(json) {
+    // Accept a plain object with tag/trigger/variable arrays
+    return {
+      accountId: '',
+      containerId: '',
+      tags: json.tag || json.tags || [],
+      triggers: json.trigger || json.triggers || [],
+      variables: json.variable || json.variables || [],
+      folders: json.folder || [],
+      builtInVars: json.builtInVariable || [],
+      exportFormatVersion: json.exportFormatVersion || null,
+      versionName: json.name || '',
+    };
+  }
+
+  function summarize(gtm) {
+    log('Container summary:');
+    log('Tags: ' + (gtm.tags?.length || 0));
+    log('Triggers: ' + (gtm.triggers?.length || 0));
+    log('Variables: ' + (gtm.variables?.length || 0));
+  }
+
+  function paramVal(p) {
+    // GTM parameters can be value, list, map
+    if (!p) return '';
+    if ('value' in p) return p.value;
+    if (Array.isArray(p.list)) return p.list.map(paramVal).join(', ');
+    if (Array.isArray(p.map)) {
+      const obj = {};
+      for (const entry of p.map) {
+        obj[entry.key] = paramVal(entry.value || entry);
+      }
+      return JSON.stringify(obj);
+    }
+    if (typeof p === 'object') return JSON.stringify(p);
+    return String(p);
+  }
+
+  function flattenParameters(parameters) {
+    const out = {};
+    if (!Array.isArray(parameters)) return out;
+    for (const p of parameters) {
+      const key = p.key || '(no key)';
+      out[key] = paramVal(p);
+    }
+    return out;
+  }
+
+  function idToNameMap(triggers) {
+    const map = {};
+    for (const t of triggers || []) {
+      if (t.triggerId) map[t.triggerId] = t.name || ('Trigger ' + t.triggerId);
+    }
+    return map;
+  }
+
+  function mapIdArrayToNames(ids, map) {
+    if (!Array.isArray(ids)) return '';
+    return ids.map(id => map[id] || id).join(', ');
+  }
+
+  function buildTagsSheet(gtm, opts) {
+    const trigMap = idToNameMap(gtm.triggers);
+    const rows = [];
+    for (const tag of gtm.tags || []) {
+      const base = {
+        tagId: tag.tagId || '',
+        name: tag.name || '',
+        type: tag.type || '',
+        liveOnly: tag.liveOnly ?? '',
+        priority: tag.priority?.value ?? '',
+        notes: tag.notes || '',
+        consentType: tag.consentSettings?.consentType || '',
+        firingTriggers: mapIdArrayToNames(tag.firingTriggerId, trigMap),
+        blockingTriggers: mapIdArrayToNames(tag.blockingTriggerId, trigMap),
+        folderId: tag.parentFolderId || '',
+      };
+      const params = flattenParameters(tag.parameter);
+      const row = { ...base, ...params };
+      if (opts.includeTagContent) {
+        // snapshot full tag JSON (stable key order)
+        row.tagContent = JSON.stringify(tag, null, 2);
+      }
+      rows.push(row);
+    }
+
+    if (opts.oneHotTriggers) {
+      // create columns for each trigger name present (firing/blocking)
+      const allTrigNames = new Set();
+      for (const r of rows) {
+        for (const name of (r.firingTriggers || '').split(', ').filter(Boolean)) allTrigNames.add('fires:' + name);
+        for (const name of (r.blockingTriggers || '').split(', ').filter(Boolean)) allTrigNames.add('blocks:' + name);
+      }
+      const cols = Array.from(allTrigNames);
+      for (const r of rows) {
+        for (const c of cols) {
+          const [kind, name] = c.split(':', 2);
+          const list = kind === 'fires' ? (r.firingTriggers || '') : (r.blockingTriggers || '');
+          r[c] = list.split(', ').includes(name) ? 1 : 0;
+        }
+      }
+    }
+
+    return rows;
+  }
+
+  function buildTriggersSheet(gtm) {
+    const rows = [];
+    for (const tr of gtm.triggers || []) {
+      const row = {
+        triggerId: tr.triggerId || '',
+        name: tr.name || '',
+        type: tr.type || '',
+        // Some trigger types expose filter / customEventFilter / etc.
+        // Flatten generic 'filter' and 'parameter' if present.
+        filters: Array.isArray(tr.filter) ? tr.filter.map(f => JSON.stringify(f)).join(' | ') : '',
+        parameters: JSON.stringify(flattenParameters(tr.parameter || [])),
+        notes: tr.notes || '',
+        folderId: tr.parentFolderId || '',
+      };
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function buildVariablesSheet(gtm) {
+    const rows = [];
+    for (const v of gtm.variables || []) {
+      const base = {
+        variableId: v.variableId || '',
+        name: v.name || '',
+        type: v.type || '',
+        notes: v.notes || '',
+        folderId: v.parentFolderId || '',
+      };
+      const params = flattenParameters(v.parameter);
+      rows.push({ ...base, ...params });
+    }
+    return rows;
+  }
+
+  function toSheet(wsData) {
+    return XLSX.utils.json_to_sheet(wsData);
+  }
+
+  function downloadXlsx(gtm, opts) {
+    const wb = XLSX.utils.book_new();
+    const includeTags = incTagsEl.checked;
+    const includeTriggers = incTriggersEl.checked;
+    const includeVars = incVarsEl.checked;
+
+    if (includeTags) {
+      const rows = buildTagsSheet(gtm, opts);
+      XLSX.utils.book_append_sheet(wb, toSheet(rows), 'Tags');
+    }
+    if (includeTriggers) {
+      const rows = buildTriggersSheet(gtm);
+      XLSX.utils.book_append_sheet(wb, toSheet(rows), 'Triggers');
+    }
+    if (includeVars) {
+      const rows = buildVariablesSheet(gtm);
+      XLSX.utils.book_append_sheet(wb, toSheet(rows), 'Variables');
+    }
+
+    const name = (gtm.container?.name || 'gtm_export') + '.xlsx';
+    XLSX.writeFile(wb, name);
+  }
+
+  // Minimal ZIP packer for CSVs using Blob URLs and <a download> is non-trivial without a zip lib.
+  // For simplicity, we’ll generate and download up to 3 CSVs independently.
+  function downloadCsvs(gtm, opts) {
+    const includeTags = incTagsEl.checked;
+    const includeTriggers = incTriggersEl.checked;
+    const includeVars = incVarsEl.checked;
+
+    function saveCsv(rows, filename) {
+      const ws = toSheet(rows);
+      const csv = XLSX.utils.sheet_to_csv(ws);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }
+
+    const prefix = (gtm.container?.name || 'gtm_export');
+
+    if (includeTags) saveCsv(buildTagsSheet(gtm, opts), prefix + '_Tags.csv');
+    if (includeTriggers) saveCsv(buildTriggersSheet(gtm), prefix + '_Triggers.csv');
+    if (includeVars) saveCsv(buildVariablesSheet(gtm), prefix + '_Variables.csv');
+  }
+
+  toExcelBtn.addEventListener('click', () => {
+    const opts = {
+      includeTagContent: includeTagContentEl.checked,
+      oneHotTriggers: oneHotTriggersEl.checked,
+    };
+    downloadXlsx(gtm, opts);
+  });
+
+  toCsvBtn.addEventListener('click', () => {
+    const opts = {
+      includeTagContent: includeTagContentEl.checked,
+      oneHotTriggers: oneHotTriggersEl.checked,
+    };
+    downloadCsvs(gtm, opts);
+  });
+</script>
+
+  <p class="help" style="margin-top:14px;">
+    Notes: GTM exports are JSON and contain arrays for tag, trigger, variable. Key fields include name, type, parameter[], firingTriggerId, blockingTriggerId, and folder relationships. This tool parses these to tabular form for QA and documentation. [Documentation references]
+  </p>
+</body>
+</html>
